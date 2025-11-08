@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableSdkContainerSupport>true</EnableSdkContainerSupport>
+    <ContainerImageName>mcp-multi-agent-poc</ContainerImageName>
+    <ContainerImageTag>latest</ContainerImageTag>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.10" />
+    <PackageReference Include="Microsoft.Extensions.AI.OpenAI" Version="9.10.2-preview.1.25552.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\McpMultiAgent.AgentCore\McpMultiAgent.AgentCore.csproj" />
+    <ProjectReference Include="..\McpMultiAgent.SearchServer\McpMultiAgent.SearchServer.csproj" />
+    <ProjectReference Include="..\McpMultiAgent.SqlServer\McpMultiAgent.SqlServer.csproj" />
+  </ItemGroup>
+
+</Project>
