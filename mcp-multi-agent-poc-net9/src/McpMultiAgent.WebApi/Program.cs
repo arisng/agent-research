@@ -1,39 +1,93 @@
+using McpMultiAgent.AgentCore;
+using McpMultiAgent.SearchServer;
+using McpMultiAgent.SqlServer;
+using Microsoft.Extensions.AI;
+
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-// Learn more about configuring OpenAPI at https://aka.ms/aspnet/openapi
+// Add services to the container
 builder.Services.AddOpenApi();
+
+// Register MCP servers
+builder.Services.AddSingleton(sp => new DuckDuckGoSearchServer());
+builder.Services.AddSingleton(sp => new SqlServerManagementServer(
+    builder.Configuration.GetConnectionString("SqlServer") ?? 
+    "Server=localhost;Database=TestDB;Integrated Security=true;TrustServerCertificate=true;"));
+
+// Register chat client (mock for POC - replace with OpenAI client in production)
+builder.Services.AddSingleton<IChatClient>(sp => new MockChatClient());
+
+// Register agents
+builder.Services.AddSingleton<SearchAgent>();
+builder.Services.AddSingleton<DatabaseAgent>();
+builder.Services.AddSingleton<MultiAgentCoordinator>();
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
+// Configure the HTTP request pipeline
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
 }
 
-var summaries = new[]
+// Agent API endpoints
+app.MapPost("/api/search", async (SearchRequest request, SearchAgent agent, CancellationToken ct) =>
 {
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
-
-app.MapGet("/weatherforecast", () =>
-{
-    var forecast =  Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
+    try
+    {
+        var result = await agent.ProcessQueryAsync(request.Query, ct);
+        return Results.Ok(new { result });
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
 })
-.WithName("GetWeatherForecast");
+.WithName("Search")
+.WithDescription("Search the internet using DuckDuckGo and get AI-summarized results");
+
+app.MapPost("/api/database", async (DatabaseRequest request, DatabaseAgent agent, CancellationToken ct) =>
+{
+    try
+    {
+        var result = await agent.ProcessRequestAsync(request.Request, ct);
+        return Results.Ok(new { result });
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+})
+.WithName("Database")
+.WithDescription("Execute SQL Server operations");
+
+app.MapPost("/api/agent", async (AgentRequest request, MultiAgentCoordinator coordinator, CancellationToken ct) =>
+{
+    try
+    {
+        var result = await coordinator.ProcessRequestAsync(request.Request, ct);
+        return Results.Ok(new { result });
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+})
+.WithName("Agent")
+.WithDescription("Process requests using multi-agent coordinator");
+
+app.MapGet("/api/health", () => Results.Ok(new
+{
+    status = "healthy",
+    timestamp = DateTime.UtcNow,
+    service = "MCP Multi-Agent POC"
+}))
+.WithName("Health");
 
 app.Run();
 
-record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}
+// Request models
+record SearchRequest(string Query);
+record DatabaseRequest(string Request);
+record AgentRequest(string Request);
+

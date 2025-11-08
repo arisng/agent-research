@@ -6,6 +6,34 @@ using McpMultiAgent.SqlServer;
 namespace McpMultiAgent.AgentCore;
 
 /// <summary>
+/// Simple mock chat client for demonstration purposes
+/// In production, replace with actual OpenAI or Azure OpenAI client
+/// </summary>
+public class MockChatClient : IChatClient
+{
+    public ChatClientMetadata Metadata => new("mock-client");
+
+    public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> chatMessages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        var lastMessage = chatMessages.LastOrDefault()?.Text ?? "";
+        var mockResponse = $"Mock response to: {lastMessage.Substring(0, Math.Min(50, lastMessage.Length))}...";
+        
+        var response = new ChatResponse(new ChatMessage(ChatRole.Assistant, mockResponse));
+        return Task.FromResult(response);
+    }
+
+    public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> chatMessages, ChatOptions? options = null, CancellationToken cancellationToken = default)
+    {
+        await Task.CompletedTask;
+        yield break;
+    }
+
+    public object? GetService(Type serviceType, object? key = null) => null;
+
+    public void Dispose() { }
+}
+
+/// <summary>
 /// Agent that can perform internet searches using DuckDuckGo
 /// </summary>
 public class SearchAgent
@@ -28,23 +56,16 @@ public class SearchAgent
         var searchResults = await _searchServer.SearchAsync(userQuery, cancellationToken);
 
         // Use LLM to summarize and format the results
-        var prompt = $@"You are a helpful assistant. Based on the search results provided, 
-answer the user's question concisely and accurately. If the search results don't contain relevant information, 
-say so clearly.
+        var prompt = $@"Based on these search results, answer the question:
 
-User Question: {userQuery}
+Question: {userQuery}
 
-Search Results:
-{searchResults}";
+Results: {searchResults.Substring(0, Math.Min(500, searchResults.Length))}";
 
-        var messages = new List<ChatMessage>
-        {
-            new(ChatRole.User, prompt)
-        };
-
-        var response = await _chatClient.CompleteAsync(messages, options: null, cancellationToken);
+        var messages = new List<ChatMessage> { new(ChatRole.User, prompt) };
+        var response = await _chatClient.GetResponseAsync(messages, null, cancellationToken);
         
-        return response.Message.Text ?? "Unable to generate a response";
+        return response.Messages.LastOrDefault()?.Text ?? searchResults;
     }
 }
 
@@ -67,7 +88,6 @@ public class DatabaseAgent
         if (string.IsNullOrWhiteSpace(userRequest))
             throw new ArgumentException("Request cannot be empty", nameof(userRequest));
 
-        // Simple pattern matching for common operations
         var lowerRequest = userRequest.ToLowerInvariant();
         string result;
 
@@ -81,29 +101,19 @@ public class DatabaseAgent
         }
         else if (lowerRequest.Contains("create database"))
         {
-            // Extract database name using LLM
-            var extractPrompt = $@"Extract the database name from this request. Return only the database name, nothing else.
-
-Request: {userRequest}";
-
+            var extractPrompt = $"Extract database name from: {userRequest}";
             var messages = new List<ChatMessage> { new(ChatRole.User, extractPrompt) };
-            var response = await _chatClient.CompleteAsync(messages, options: null, cancellationToken);
-            var dbName = (response.Message.Text ?? "TestDB").Trim();
+            var response = await _chatClient.GetResponseAsync(messages, null, cancellationToken);
+            var dbName = (response.Messages.LastOrDefault()?.Text ?? "TestDB").Trim().Split(' ').Last();
             
             result = await _sqlServer.CreateDatabaseAsync(dbName, cancellationToken);
         }
         else if (lowerRequest.Contains("create table"))
         {
-            // Use LLM to extract table structure
-            var extractPrompt = $@"Extract the table name and column definitions from this request. 
-Return in format: TABLE_NAME|COLUMN_DEFINITIONS
-For example: Users|Id INT PRIMARY KEY, Name NVARCHAR(100), Email NVARCHAR(255)
-
-Request: {userRequest}";
-
+            var extractPrompt = $"Extract table name and columns from: {userRequest}";
             var messages = new List<ChatMessage> { new(ChatRole.User, extractPrompt) };
-            var response = await _chatClient.CompleteAsync(messages, options: null, cancellationToken);
-            var parts = (response.Message.Text ?? "TestTable|Id INT").Split('|');
+            var response = await _chatClient.GetResponseAsync(messages, null, cancellationToken);
+            var parts = (response.Messages.LastOrDefault()?.Text ?? "TestTable|Id INT").Split('|');
             var tableName = parts.Length > 0 ? parts[0].Trim() : "TestTable";
             var columns = parts.Length > 1 ? parts[1].Trim() : "Id INT PRIMARY KEY";
             
@@ -111,34 +121,19 @@ Request: {userRequest}";
         }
         else if (lowerRequest.Contains("select ") || lowerRequest.Contains("query"))
         {
-            // Extract query using LLM
-            var extractPrompt = $@"Extract or create the SQL SELECT query from this request. Return only the SQL query, nothing else.
-
-Request: {userRequest}";
-
+            var extractPrompt = $"Extract SQL query from: {userRequest}";
             var messages = new List<ChatMessage> { new(ChatRole.User, extractPrompt) };
-            var response = await _chatClient.CompleteAsync(messages, options: null, cancellationToken);
-            var query = response.Message.Text ?? "SELECT 1";
+            var response = await _chatClient.GetResponseAsync(messages, null, cancellationToken);
+            var query = response.Messages.LastOrDefault()?.Text ?? "SELECT 1";
             
             result = await _sqlServer.QueryAsync(query, cancellationToken);
         }
         else
         {
-            result = "I can help you with:\n- Listing databases\n- Listing tables\n- Creating databases\n- Creating tables\n- Running SELECT queries\n\nPlease rephrase your request.";
+            result = "Supported operations:\n- List databases\n- List tables\n- Create database\n- Create table\n- Run SELECT query";
         }
 
-        // Format the response using LLM
-        var formatPrompt = $@"Present this database operation result to the user in a clear and friendly way.
-
-User Request: {userRequest}
-
-Operation Result:
-{result}";
-        
-        var formatMessages = new List<ChatMessage> { new(ChatRole.User, formatPrompt) };
-        var formatResponse = await _chatClient.CompleteAsync(formatMessages, cancellationToken);
-        
-        return formatResponse.Message.Text ?? result;
+        return result;
     }
 }
 
@@ -163,44 +158,28 @@ public class MultiAgentCoordinator
         if (string.IsNullOrWhiteSpace(userRequest))
             throw new ArgumentException("Request cannot be empty", nameof(userRequest));
 
-        // Use LLM to determine which agent(s) to use
-        var routingPrompt = $@"Analyze this user request and determine which agent should handle it.
-Respond with only one word: search, database, or both
-
-- search: For internet searches, finding information online, answering general knowledge questions
-- database: For SQL Server operations like creating databases, tables, or querying data
-- both: If the task requires both searching for information AND database operations
-
-User Request: {userRequest}";
-
-        var routingMessages = new List<ChatMessage> { new(ChatRole.User, routingPrompt) };
-        var routingResponse = await _chatClient.CompleteAsync(routingMessages, cancellationToken);
-        var routeText = (routingResponse.Message.Text ?? "search").Trim().ToLowerInvariant();
+        // Use simple heuristics for routing
+        var lower = userRequest.ToLowerInvariant();
+        var isDatabase = lower.Contains("database") || lower.Contains("table") || lower.Contains("sql") || lower.Contains("query");
+        var isSearch = lower.Contains("search") || lower.Contains("find") || lower.Contains("what is") || lower.Contains("who is");
 
         var results = new StringBuilder();
 
-        if (routeText == "search")
-        {
-            var searchResult = await _searchAgent.ProcessQueryAsync(userRequest, cancellationToken);
-            results.AppendLine(searchResult);
-        }
-        else if (routeText == "database")
+        if (isDatabase && !isSearch)
         {
             var dbResult = await _databaseAgent.ProcessRequestAsync(userRequest, cancellationToken);
             results.AppendLine(dbResult);
         }
+        else if (isSearch && !isDatabase)
+        {
+            var searchResult = await _searchAgent.ProcessQueryAsync(userRequest, cancellationToken);
+            results.AppendLine(searchResult);
+        }
         else
         {
-            // Execute both agents for "both" or unknown routes
-            var searchTask = _searchAgent.ProcessQueryAsync(userRequest, cancellationToken);
-            var dbTask = _databaseAgent.ProcessRequestAsync(userRequest, cancellationToken);
-            await Task.WhenAll(searchTask, dbTask);
-            
-            results.AppendLine("Search Results:");
-            results.AppendLine(searchTask.Result);
-            results.AppendLine();
-            results.AppendLine("Database Results:");
-            results.AppendLine(dbTask.Result);
+            // Default to search for general queries
+            var searchResult = await _searchAgent.ProcessQueryAsync(userRequest, cancellationToken);
+            results.AppendLine(searchResult);
         }
 
         return results.ToString();
